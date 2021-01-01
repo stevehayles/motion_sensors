@@ -95,11 +95,11 @@ public class MotionSensorsPlugin : FlutterPlugin, MethodChannel.MethodCallHandle
     magnetometerChannel!!.setStreamHandler(magnetometerStreamHandler!!)
 
     orientationChannel = EventChannel(messenger, ORIENTATION_CHANNEL_NAME)
-    orientationStreamHandler = RotationVectorStreamHandler(sensorManager!!, Sensor.TYPE_GAME_ROTATION_VECTOR)
+    orientationStreamHandler = RotationVectorStreamHandler(context, sensorManager!!, Sensor.TYPE_GAME_ROTATION_VECTOR)
     orientationChannel!!.setStreamHandler(orientationStreamHandler!!)
 
     absoluteOrientationChannel = EventChannel(messenger, ABSOLUTE_ORIENTATION_CHANNEL_NAME)
-    absoluteOrientationStreamHandler = RotationVectorStreamHandler(sensorManager!!, Sensor.TYPE_ROTATION_VECTOR)
+    absoluteOrientationStreamHandler = RotationVectorStreamHandler(context, sensorManager!!, Sensor.TYPE_ROTATION_VECTOR)
     absoluteOrientationChannel!!.setStreamHandler(absoluteOrientationStreamHandler!!)
 
     screenOrientationChannel = EventChannel(messenger, SCREEN_ORIENTATION_CHANNEL_NAME)
@@ -165,7 +165,7 @@ class StreamHandlerImpl(private val sensorManager: SensorManager, sensorType: In
   }
 }
 
-class RotationVectorStreamHandler(private val sensorManager: SensorManager, sensorType: Int, private var interval: Int = SensorManager.SENSOR_DELAY_NORMAL) :
+class RotationVectorStreamHandler(private val context: Context, private val sensorManager: SensorManager, sensorType: Int, private var interval: Int = SensorManager.SENSOR_DELAY_NORMAL) :
         EventChannel.StreamHandler, SensorEventListener {
   private val sensor = sensorManager.getDefaultSensor(sensorType)
   private var eventSink: EventChannel.EventSink? = null
@@ -189,9 +189,43 @@ class RotationVectorStreamHandler(private val sensorManager: SensorManager, sens
   override fun onSensorChanged(event: SensorEvent?) {
     var matrix = FloatArray(9)
     SensorManager.getRotationMatrixFromVector(matrix, event!!.values)
-    var orientation = FloatArray(3)
-    SensorManager.getOrientation(matrix, orientation)
-    val sensorValues = listOf(-orientation[0], -orientation[1], orientation[2])
+
+    // see https://stackoverflow.com/questions/53408642/azimuth-reading-changes-to-opposite-when-user-holds-the-phone-upright
+    /*
+     *   /  R[ 0]   R[ 1]   R[ 2]  \
+     *   |  R[ 3]   R[ 4]   R[ 5]  |
+     *   \  R[ 6]   R[ 7]   R[ 8]  /
+     *
+     *  The rotation matrix consists of the components of the vectors that point in the device's three axes:
+     *  column 0: vector pointing to phone's right axis
+     *  column 1: vector pointing to phone's up axis
+     *  column 2: vector pointing to phone's front axis
+     *  The vectors are effectively described in an 'Earth' coordinate system of East, North and Up / Sky
+     *  For azimuth we use the Atan2 function (ignoring the Up vector)
+     *  For pitch we use Asin on the Sky vector of the phones Up axis and for roll we use the same on the right vector
+     *  Using a screen rotation check we can adjust which axis is used from the rotation matrix and flip the sign as needed
+     *
+     *  This returns a result similar to 'SensorManager.getOrientation' but without the issue when the phone is pointing 
+     *  upwards and is akin to the functionality expected in a mapping application like Google Maps
+     */
+
+    val (matrixColumn, sense) = when (val rotation = (context.getSystemService(Context.WINDOW_SERVICE) as WindowManager).defaultDisplay.rotation) {
+      Surface.ROTATION_0 -> Pair(0, 1)
+      Surface.ROTATION_90 -> Pair(1, -1)
+      Surface.ROTATION_180 -> Pair(0, -1)
+      Surface.ROTATION_270 -> Pair(1, 1)
+      else -> error("Invalid screen rotation value: $rotation")
+    }
+    
+    val x = sense * matrix[matrixColumn]
+    val y = sense * matrix[matrixColumn + 3]
+    val azimuth = kotlin.math.atan2(y, x)
+
+    val pitch = kotlin.math.asin(matrix[7 - matrixColumn])
+    val roll = sense * kotlin.math.asin(matrix[6 + matrixColumn])
+
+    val sensorValues = listOf(azimuth, pitch, -roll)
+    
     eventSink?.success(sensorValues)
   }
 
